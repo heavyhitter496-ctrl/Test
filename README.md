@@ -41,25 +41,4 @@ export async function subscribeUser(priceId) { const stripe = await stripePromis
 // --------------------------- // 7. Swipe / Match Logic // --------------------------- export async function swipe(userId, targetId, action) { if (action === 'like') { // Check if target liked back const { data: match } = await supabase .from('matches') .select('*') .or(user1_id.eq.${targetId},user2_id.eq.${targetId}) .eq('status', 'pending') .single();
 
 if (match) {
-  await supabase.from('matches').update({ status: 'matched' }).eq('id', match.id);
-} else {
-  await supabase.from('matches').insert({ user1_id: userId, user2_id: targetId, status: 'pending' });
-}
-
-} }
-
-/* Instructions:
-
-1. Replace placeholder keys (Supabase, Stripe, OpenAI) with your actual credentials.
-
-
-2. Deploy Supabase project with tables: users, matches, messages, subscriptions.
-
-
-3. Deploy web app via Vercel and mobile app via Expo.
-
-
-4. Configure scheduled functions to run botSendMessage() periodically for active bots. */
-
-
-
+  await 
