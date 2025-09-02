@@ -1,0 +1,16 @@
+git clone https://github.com/heavyhitter496-ctrl/Test.git
+cd Test"scripts": {
+  "dev": "next dev -p 3000",
+  "build": "next build",
+  "start": "next start -p 3000",
+  "lint": "next lint"
+}git add package.json .env.example
+git commit -m "Add start/build scripts and env example"
+git pushNEXT_PUBLIC_SUPABASE_URL=https://xyz.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=pubkey_...
+SUPABASE_SERVICE_ROLE_KEY=service_role_...
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+NEXT_PUBLIC_STRIPE_PUBLIC_KEY=pk_live_...
+NEXT_PUBLIC_APP_URL=https://your-app.example.com   # change when deployed
+SUBSCRIPTION_PRICE_ID=price_XXXXXXXX
