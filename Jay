@@ -1,0 +1,124 @@
+-- Profiles, likes, matches, threads, messages, subscriptions
+create table if not exists public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  created_at timestamptz default now(),
+  display_name text,
+  bio text,
+  birthdate date not null,
+  gender text,
+  interests text[],
+  photos text[], -- URLs in Supabase Storage
+  lat double precision,
+  lng double precision,
+  is_verified boolean default false,
+  accepts_ai boolean default false,
+  photo_review_status text default 'pending' -- pending, approved, rejected
+);
+
+create table if not exists public.likes (
+  id bigserial primary key,
+  created_at timestamptz default now(),
+  liker uuid references auth.users(id) on delete cascade,
+  liked uuid references auth.users(id) on delete cascade,
+  unique(liker, liked)
+);
+
+create table if not exists public.matches (
+  id bigserial primary key,
+  created_at timestamptz default now(),
+  a uuid references auth.users(id) on delete cascade,
+  b uuid references auth.users(id) on delete cascade,
+  unique(a,b)
+);
+
+create table if not exists public.threads (
+  id bigserial primary key,
+  created_at timestamptz default now(),
+  match_id bigint references public.matches(id) on delete cascade
+);
+
+create table if not exists public.messages (
+  id bigserial primary key,
+  created_at timestamptz default now(),
+  thread_id bigint references public.threads(id) on delete cascade,
+  sender uuid references auth.users(id) on delete cascade,
+  body text
+);
+
+create table if not exists public.subscriptions (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  status text check (status in ('none','active','past_due','canceled')) default 'none',
+  current_period_end timestamptz
+);
+
+-- Moderation: reports and review queue
+create table if not exists public.reports (
+  id bigserial primary key,
+  created_at timestamptz default now(),
+  reporter uuid references auth.users(id) on delete cascade,
+  target_user uuid references auth.users(id),
+  target_message_id bigint null references public.messages(id),
+  reason text,
+  details text,
+  handled boolean default false,
+  outcome text -- 'none','removed','warning','suspended'
+);
+
+create table if not exists public.photo_reviews (
+  id bigserial primary key,
+  created_at timestamptz default now(),
+  profile_id uuid references public.profiles(id) on delete cascade,
+  photo_url text,
+  reviewer uuid null references auth.users(id),
+  status text default 'pending', -- pending, approved, rejected
+  notes text
+);
+
+-- RLS enablement
+alter table public.profiles enable row level security;
+alter table public.likes enable row level security;
+alter table public.matches enable row level security;
+alter table public.threads enable row level security;
+alter table public.messages enable row level security;
+alter table public.subscriptions enable row level security;
+alter table public.reports enable row level security;
+alter table public.photo_reviews enable row level security;
+
+-- Minimal policies (adjust for stricter production rules)
+create policy "own profile" on public.profiles for select using (true);
+create policy "update own profile" on public.profiles for update using (auth.uid() = id);
+create policy "insert self" on public.profiles for insert with check (auth.uid() = id);
+
+create policy "likes read own related" on public.likes for select using (auth.uid() in (liker, liked));
+create policy "likes insert self" on public.likes for insert with check (auth.uid() = liker);
+
+create policy "matches read related" on public.matches for select using (auth.uid() in (a,b));
+
+create policy "threads read related" on public.threads for select using (
+  exists(select 1 from public.matches m where m.id = match_id and auth.uid() in (m.a, m.b))
+);
+create policy "messages read related" on public.messages for select using (
+  exists(
+    select 1 from public.threads t
+    join public.matches m on m.id = t.match_id
+    where t.id = thread_id and auth.uid() in (m.a, m.b)
+  )
+);
+create policy "messages insert self" on public.messages for insert with check (true);
+
+create policy "subs read own" on public.subscriptions for select using (auth.uid() = user_id);
+create policy "subs upsert own" on public.subscriptions for insert with check (auth.uid() = user_id);
+
+create policy "reports insert" on public.reports for insert with check (auth.uid() = reporter);
+create policy "reports read moderator" on public.reports for select using (true); -- restrict later to moderator role
+create policy "photo_reviews insert" on public.photo_reviews for insert with check (true);
+create policy "photo_reviews read moderator" on public.photo_reviews for select using (true);
+
+-- ensure_match helper
+create or replace function public.ensure_match(a uuid, b uuid) returns public.matches as $$
+declare existing public.matches%rowtype;
+begin
+  select * into existing from public.matches where (a = a and b = b) or (a = b and b = a) limit 1;
+  if found then return existing; end if;
+  insert into public.matches(a,b) values (a,b) returning * into existing; return existing;
+end; $$ language plpgsql security definerl
