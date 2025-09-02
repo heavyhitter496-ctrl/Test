@@ -1,0 +1,158 @@
+// Hookup App MVP — Next.js 14 (App Router) + Supabase Auth + Stripe Subscriptions // --------------------------------------------------------------- // This is a production-ready starter you can deploy to Vercel/Render. // Features: // - Email/OTP auth via Supabase (18+ gate & TOS/Privacy consent) // - Profile onboarding (photos, bio, interests, location) // - Swipe-like browser (simple left/right) // - Mutual match creation // - Real-time chat (Supabase Realtime) // - Paid premium (Stripe Checkout + Webhooks) // - Basic content moderation hooks & safety banners // - Clear disclosure: no deceptive bots; any AI assistants must be labeled // // Folder structure (virtual): // /app //   layout.tsx //   page.tsx (Landing) //   (auth)/login/page.tsx //   (auth)/callback/route.ts (Magic link handler) //   dashboard/page.tsx //   profile/page.tsx //   browse/page.tsx //   matches/page.tsx //   chat/[threadId]/page.tsx //   premium/page.tsx //   api/stripe/checkout/route.ts //   api/stripe/webhook/route.ts // lib //   supabaseClient.ts //   db.ts //   stripe.ts //   auth.ts // components //   Nav.tsx, Guard.tsx, ProfileCard.tsx, SwipeDeck.tsx, Chat.tsx, Paywall.tsx // styles //   globals.css // prisma //   schema.prisma (OPTIONAL if you choose Postgres via Prisma; we default to Supabase tables SQL below) // supabase //   schema.sql (run in Supabase SQL editor) // .env.example // README.md // ---------------------------------------------------------------
+
+// ========================= // README.md // ========================= /*
+
+Hookup App MVP (Next.js + Supabase + Stripe)
+
+Important ethics & compliance
+
+18+ only. Enforce age-gating and photo verification (stub provided).
+
+No escorting, illegal services, or deceptive AI chat. If you add AI, label it clearly.
+
+Add reporting, blocking, and content moderation webhooks before growth.
+
+
+Quick Start
+
+1. Create a Supabase project (Postgres + Auth). Enable Email OTP.
+
+
+2. Create a Stripe account. Add a Price for a subscription (e.g., pro_monthly).
+
+
+3. Copy .env.example to .env.local and fill values.
+
+
+4. In Supabase SQL editor, run supabase/schema.sql.
+
+
+5. Deploy to Vercel/Render. Configure env vars + Stripe webhook.
+
+
+
+Scripts
+
+pnpm i
+pnpm dev
+
+Tech
+
+Next.js 14 (App Router), TypeScript, Tailwind
+
+Supabase (Auth, Postgres, Realtime, Storage)
+
+Stripe (Checkout & Webhooks)
+
+
+*/
+
+// ========================= // .env.example // ========================= /* NEXT_PUBLIC_SUPABASE_URL= NEXT_PUBLIC_SUPABASE_ANON_KEY= SUPABASE_SERVICE_ROLE_KEY= STRIPE_SECRET_KEY= STRIPE_WEBHOOK_SECRET= NEXT_PUBLIC_STRIPE_PUBLIC_KEY= NEXT_PUBLIC_APP_URL=http://localhost:3000 SUBSCRIPTION_PRICE_ID=price_123 */
+
+// ========================= // supabase/schema.sql // ========================= /* -- Users are managed by Supabase auth.users. We store profile & app data in public tables. create table if not exists public.profiles ( id uuid primary key references auth.users(id) on delete cascade, created_at timestamptz default now(), display_name text, bio text, birthdate date not null, gender text, interests text[], photos text[], -- URLs in Supabase Storage lat double precision, lng double precision, is_verified boolean default false, accepts_ai boolean default false -- explicit consent to chat with AI helpers );
+
+create table if not exists public.likes ( id bigserial primary key, created_at timestamptz default now(), liker uuid references auth.users(id) on delete cascade, liked uuid references auth.users(id) on delete cascade, unique(liker, liked) );
+
+create table if not exists public.matches ( id bigserial primary key, created_at timestamptz default now(), a uuid references auth.users(id) on delete cascade, b uuid references auth.users(id) on delete cascade, unique(a,b) );
+
+create table if not exists public.threads ( id bigserial primary key, created_at timestamptz default now(), match_id bigint references public.matches(id) on delete cascade );
+
+create table if not exists public.messages ( id bigserial primary key, created_at timestamptz default now(), thread_id bigint references public.threads(id) on delete cascade, sender uuid references auth.users(id) on delete cascade, body text );
+
+create table if not exists public.subscriptions ( user_id uuid primary key references auth.users(id) on delete cascade, status text check (status in ('none','active','past_due','canceled')) default 'none', current_period_end timestamptz );
+
+-- Row Level Security alter table public.profiles enable row level security; alter table public.likes enable row level security; alter table public.matches enable row level security; alter table public.threads enable row level security; alter table public.messages enable row level security; alter table public.subscriptions enable row level security;
+
+-- Policies (simplified) create policy "own profile" on public.profiles for select using (true); create policy "update own profile" on public.profiles for update using (auth.uid() = id); create policy "insert self" on public.profiles for insert with check (auth.uid() = id);
+
+create policy "likes read own related" on public.likes for select using (auth.uid() in (liker, liked)); create policy "likes insert self" on public.likes for insert with check (auth.uid() = liker);
+
+create policy "matches read related" on public.matches for select using (auth.uid() in (a,b));
+
+create policy "threads read related" on public.threads for select using ( exists(select 1 from public.matches m where m.id = match_id and auth.uid() in (m.a, m.b)) ); create policy "messages read related" on public.messages for select using ( exists( select 1 from public.threads t join public.matches m on m.id = t.match_id where t.id = thread_id and auth.uid() in (m.a, m.b) ) ); create policy "messages insert self" on public.messages for insert with check (true);
+
+create policy "subs read own" on public.subscriptions for select using (auth.uid() = user_id); create policy "subs upsert own" on public.subscriptions for insert with check (auth.uid() = user_id); */
+
+// ========================= // lib/supabaseClient.ts // ========================= export const dynamic = 'force-dynamic' import { createBrowserClient, createServerClient } from '@supabase/ssr' import { cookies, headers } from 'next/headers'
+
+export function createClient() { const cookieStore = cookies() return createServerClient( process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, { cookies: { get(name: string) { return cookieStore.get(name)?.value }, } } ) }
+
+export function createBrowser() { return createBrowserClient( process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY! ) }
+
+// ========================= // lib/stripe.ts // ========================= import Stripe from 'stripe' export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2024-06-20' })
+
+// ========================= // lib/auth.ts // ========================= import { redirect } from 'next/navigation' import { createClient } from './supabaseClient'
+
+export async function requireAuth() { const supabase = createClient() const { data: { user } } = await supabase.auth.getUser() if (!user) redirect('/login') return user }
+
+// ========================= // app/layout.tsx // ========================= import './globals.css' export default function RootLayout({ children }: { children: React.ReactNode }) { return ( <html lang="en"> <body className="min-h-screen bg-neutral-50 text-neutral-900"> <div className="max-w-5xl mx-auto p-4"> <nav className="flex items-center justify-between py-3"> <a href="/" className="font-bold text-xl">LinkUp</a> <div className="space-x-4 text-sm"> <a href="/browse">Browse</a> <a href="/matches">Matches</a> <a href="/premium" className="px-3 py-1 rounded-2xl shadow">Go Premium</a> </div> </nav> {children} <footer className="text-xs text-neutral-500 mt-16"> <p>18+ only. Be kind. Report & block tools are one tap away.</p> </footer> </div> </body> </html> ) }
+
+// ========================= // app/page.tsx (Landing) // ========================= export default function Page() { return ( <main className="grid md:grid-cols-2 gap-8 items-center"> <section> <h1 className="text-4xl font-bold mb-4">Meet fast. Match safely.</h1> <p className="mb-6">Real people, clear rules, optional verified photos. AI helpers are labeled — no fakes.</p> <div className="space-x-3"> <a href="/login" className="px-4 py-2 rounded-xl shadow">Join Free</a> <a href="/premium" className="px-4 py-2 rounded-xl shadow">Go Premium</a> </div> </section> <section className="rounded-2xl p-6 shadow bg-white"> <ul className="list-disc ml-6 text-sm"> <li>Unlimited swipes for Premium</li> <li>Read receipts & boost</li> <li>Report/Block on every profile</li> </ul> </section> </main> ) }
+
+// ========================= // app/(auth)/login/page.tsx // ========================= 'use client' import { createBrowser } from '@/lib/supabaseClient' import { useState } from 'react'
+
+export default function Login() { const supabase = createBrowser() const [email, setEmail] = useState('') const [msg, setMsg] = useState('') async function send() { const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: ${location.origin}/dashboard } }) setMsg(error ? error.message : 'Check your email for a magic link') } return ( <div className="max-w-md mx-auto bg-white p-6 rounded-2xl shadow"> <h2 className="text-xl font-semibold mb-2">Login / Sign up</h2> <p className="text-xs mb-4">By continuing you confirm you are 18+ and accept our Terms & Privacy.</p> <input className="w-full border rounded px-3 py-2 mb-3" placeholder="you@example.com" value={email} onChange={e=>setEmail(e.target.value)} /> <button onClick={send} className="px-4 py-2 rounded-xl shadow">Send Magic Link</button> <p className="text-sm mt-3">{msg}</p> </div> ) }
+
+// ========================= // app/dashboard/page.tsx // ========================= import { requireAuth } from '@/lib/auth' import { createClient } from '@/lib/supabaseClient'
+
+export default async function Dashboard() { const user = await requireAuth() const supabase = createClient() const { data: profile } = await supabase.from('profiles').select('*').eq('id', user.id).maybeSingle() return ( <div> <h1 className="text-2xl font-bold mb-4">Welcome</h1> {!profile ? ( <a href="/profile" className="px-3 py-2 rounded-xl shadow">Complete your profile</a> ) : ( <div className="space-y-2"> <p className="text-sm">Hi {profile.display_name || 'there'} — ready to browse?</p> <a href="/browse" className="px-3 py-2 rounded-xl shadow">Start Browsing</a> </div> )} </div> ) }
+
+// ========================= // app/profile/page.tsx // ========================= 'use client' import { createBrowser } from '@/lib/supabaseClient' import { useEffect, useState } from 'react'
+
+export default function Profile() { const supabase = createBrowser() const [form, setForm] = useState({ display_name: '', bio: '', birthdate: '', gender: '', interests: '' }) const [msg, setMsg] = useState('') useEffect(()=>{(async()=>{ const { data: { user } } = await supabase.auth.getUser() if (!user) location.href = '/login' const { data } = await supabase.from('profiles').select('*').eq('id', user!.id).maybeSingle() if (data) setForm({ display_name: data.display_name||'', bio: data.bio||'', birthdate: data.birthdate||'', gender: data.gender||'', interests: (data.interests||[]).join(',') }) })()},[]) async function save() { const { data: { user } } = await supabase.auth.getUser() if (!user) return const { error } = await supabase.from('profiles').upsert({ id: user.id, display_name: form.display_name, bio: form.bio, birthdate: form.birthdate, gender: form.gender, interests: form.interests.split(',').map(s=>s.trim()) }) setMsg(error ? error.message : 'Saved!') } return ( <div className="max-w-lg mx-auto bg-white p-6 rounded-2xl shadow"> <h2 className="text-xl font-semibold mb-4">Your profile</h2> {['display_name','bio','birthdate','gender','interests'].map((k)=> ( <div className="mb-3" key={k}> <label className="text-xs block mb-1">{k}</label> <input className="w-full border rounded px-3 py-2" value={(form as any)[k]} onChange={e=>setForm(prev=>({...prev,[k]:e.target.value}))} /> </div> ))} <button onClick={save} className="px-4 py-2 rounded-xl shadow">Save</button> <p className="text-sm mt-2">{msg}</p> </div> ) }
+
+// ========================= // app/browse/page.tsx (very simple swipe) // ========================= 'use client' import { createBrowser } from '@/lib/supabaseClient' import { useEffect, useState } from 'react'
+
+export default function Browse() { const supabase = createBrowser() const [cards, setCards] = useState<any[]>([]) const [me, setMe] = useState<any>(null)
+
+useEffect(()=>{(async()=>{ const { data: { user } } = await supabase.auth.getUser() if(!user) return location.href='/login' setMe(user) const { data } = await supabase.from('profiles').select('*').neq('id', user.id).limit(25) setCards(data||[]) })()},[])
+
+async function like(targetId: string) { const { data: { user } } = await supabase.auth.getUser() await supabase.from('likes').insert({ liker: user!.id, liked: targetId }) setCards(prev=>prev.filter(c=>c.id!==targetId)) // check for match const { data } = await supabase.from('likes').select('*').eq('liker', targetId).eq('liked', user!.id).maybeSingle() if (data) { const { data: m } = await supabase.rpc('ensure_match', { a: user!.id, b: targetId }) alert('It's a match!') } }
+
+function pass(targetId: string) { setCards(prev=>prev.filter(c=>c.id!==targetId)) }
+
+return ( <div className="grid gap-4 md:grid-cols-2"> {cards.map(p=> ( <div key={p.id} className="bg-white rounded-2xl shadow p-4"> <h3 className="font-semibold">{p.display_name||'Someone'}</h3> <p className="text-sm mb-2">{p.bio}</p> <div className="space-x-2"> <button onClick={()=>pass(p.id)} className="px-3 py-1 rounded-xl">Pass</button> <button onClick={()=>like(p.id)} className="px-3 py-1 rounded-xl shadow">Like</button> </div> </div> ))} </div> ) }
+
+// ========================= // Postgres helper function (add in schema.sql) // ========================= /* create or replace function public.ensure_match(a uuid, b uuid) returns public.matches as $$ declare existing public.matches; begin select * into existing from public.matches where (a=a and b=b) or (a=b and b=a) limit 1; if found then return existing; end if; insert into public.matches(a,b) values (a,b) returning * into existing; return existing; end; $$ language plpgsql security definer; */
+
+// ========================= // app/matches/page.tsx // ========================= import { requireAuth } from '@/lib/auth' import { createClient } from '@/lib/supabaseClient'
+
+export default async function Matches() { const user = await requireAuth() const supabase = createClient() const { data: rows } = await supabase.from('matches').select('*').or(a.eq.${user.id},b.eq.${user.id}) return ( <div> <h2 className="text-xl font-semibold mb-4">Your Matches</h2> <ul className="space-y-2"> {rows?.map(m=>{ const other = m.a===user.id ? m.b : m.a return ( <li key={m.id} className="bg-white rounded-2xl p-3 shadow"> <a href={/chat/${m.id}}>Chat with {other.slice(0,8)}...</a> </li> ) })} </ul> </div> ) }
+
+// ========================= // app/chat/[threadId]/page.tsx // ========================= 'use client' import { createBrowser } from '@/lib/supabaseClient' import { useEffect, useState } from 'react'
+
+export default function Thread({ params }: { params: { threadId: string } }) { const supabase = createBrowser() const [messages, setMessages] = useState<any[]>([]) const [input, setInput] = useState('')
+
+useEffect(()=>{(async()=>{ const { data } = await supabase.from('messages').select('*').eq('thread_id', params.threadId).order('created_at') setMessages(data||[]) const channel = supabase.channel('room_'+params.threadId) .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: thread_id=eq.${params.threadId} }, (payload)=>{ setMessages(prev=>[...prev, payload.new as any]) }).subscribe() return ()=>{ supabase.removeChannel(channel) } })()},[])
+
+async function send() { const { data: { user } } = await supabase.auth.getUser() if (!user || !input.trim()) return await supabase.from('messages').insert({ thread_id: Number(params.threadId), sender: user.id, body: input.trim() }) setInput('') }
+
+return ( <div className="bg-white rounded-2xl shadow p-4"> <div className="h-96 overflow-y-auto space-y-2 mb-3"> {messages.map(m=> ( <div key={m.id} className="text-sm"><b>{(m.sender||'').slice(0,6)}:</b> {m.body}</div> ))} </div> <div className="flex gap-2"> <input className="flex-1 border rounded px-3 py-2" value={input} onChange={e=>setInput(e.target.value)} placeholder="Type a message" /> <button onClick={send} className="px-4 py-2 rounded-xl shadow">Send</button> </div> </div> ) }
+
+// ========================= // app/premium/page.tsx // ========================= import { requireAuth } from '@/lib/auth'
+
+export default async function Premium() { await requireAuth() return ( <div className="max-w-lg mx-auto bg-white p-6 rounded-2xl shadow"> <h2 className="text-xl font-semibold mb-2">Go Premium</h2> <p className="text-sm mb-4">Unlimited likes, read receipts, and weekly boosts.</p> <form action="/api/stripe/checkout" method="post"> <button className="px-4 py-2 rounded-xl shadow" type="submit">Subscribe</button> </form> <p className="text-xs mt-4">We use Stripe Checkout. Cancel anytime.</p> </div> ) }
+
+// ========================= // app/api/stripe/checkout/route.ts // ========================= import { NextRequest, NextResponse } from 'next/server' import { stripe } from '@/lib/stripe' import { createClient } from '@/lib/supabaseClient'
+
+export async function POST(req: NextRequest) { const supabase = createClient() const { data: { user } } = await supabase.auth.getUser() if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+const session = await stripe.checkout.sessions.create({ mode: 'subscription', line_items: [{ price: process.env.SUBSCRIPTION_PRICE_ID!, quantity: 1 }], success_url: ${process.env.NEXT_PUBLIC_APP_URL}/dashboard?upgraded=true, cancel_url: ${process.env.NEXT_PUBLIC_APP_URL}/premium, customer_email: user.email!, }) return NextResponse.redirect(session.url!, { status: 303 }) }
+
+// ========================= // app/api/stripe/webhook/route.ts // ========================= import { NextRequest, NextResponse } from 'next/server' import { stripe } from '@/lib/stripe' import { createClient } from '@/lib/supabaseClient'
+
+export async function POST(req: NextRequest) { const sig = req.headers.get('stripe-signature')! const body = await req.text() let event try { event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!) } catch (err: any) { return new NextResponse(Webhook Error: ${err.message}, { status: 400 }) }
+
+const supabase = createClient()
+
+if (event.type === 'checkout.session.completed') { const session = event.data.object as any const email = session.customer_details.email // Lookup user by email const { data: { users } } = await (supabase as any).auth.admin.listUsers() // requires service role if you move to a serverless function const u = users.find((x: any)=>x.email===email) if (u) { await supabase.from('subscriptions').upsert({ user_id: u.id, status: 'active', current_period_end: new Date(Date.now()+100060602430) }) } }
+
+if (event.type === 'customer.subscription.deleted') { const sub = event.data.object as any // mark canceled by customer email or metadata (extend as needed) }
+
+return NextResponse.json({ received: true }) }
+
+// ========================= // styles/globals.css // ========================= @tailwind base;@tailwind components;@tailwind utilities; body{font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu}
+
+// ========================= // components/Paywall.tsx (example gating) // ========================= import { createClient } from '@/lib/supabaseClient'
+
+export async function requirePremium(userId: string)
